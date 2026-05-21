@@ -40,8 +40,7 @@ Parameter werden im `CONFIG`-Block am Anfang des Sim-Skripts editiert
 |-------------------------------|-------------------------------------------------|
 | `HANDBUCH.{md,pdf}`           | Tutorial (Theorie + Übungen + Aufgaben)         |
 | `btes/`, `ates/`              | Übungs-Ordner mit Sim- und Plot-Skripten        |
-| `solar_to_monthly.py`         | Solar­ertrag → Monatsprofil-Helfer              |
-| `data/`                       | Berechnungshilfe-Tabelle (xlsx)                 |
+| `solar_to_monthly.py`         | Solar­ertrag → Monatsprofil-Helfer (typisiert)  |
 | `formulas/`                   | Gerenderte LaTeX-Formelgrafiken (im Handbuch)   |
 | `figures_illustrations/`      | Schemazeichnungen (im Handbuch)                 |
 | `requirements.txt`            | Python-Abhängigkeiten                            |

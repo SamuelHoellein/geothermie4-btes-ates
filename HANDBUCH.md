@@ -741,17 +741,16 @@ ist, sollte die Jahres­bilanz Σ<sub>m</sub> Δ*Q*(*m*) ≈ 0 sein
 Fläche führt zu einem netto „aufladenden" Speicher (η → 0 in den
 Plots), eine zu kleine zu einem netto „leerenden".
 
-**Hilfsskript.** `solar_to_monthly.py` (auf Top-Level von `exercises/`)
-liest die Tabelle `data/Solarthermie_Berechnungshilfe.xlsx` (sheets
-`Vakuum-Röhrenkollektor`, `Flachkollektor`), nimmt
-*A*<sub>koll</sub> und das Lastprofil entgegen und liefert die fertige
-12-Werte-Liste `monthly_power_W`.
+**Hilfsskript.** `solar_to_monthly.py` enthält ein **typisiertes
+Monats­profil** für einen Vakuum-Röhrenkollektor in Mitteleuropa
+(β ≈ 40°, ≈ 940 kWh/m²/a Gesamt­ertrag) als grobe Größen­ordnung.
+Es ersetzt eine ausführliche Solar­ertrag­rechnung für die Übung
+und liefert direkt die 12-Werte-Liste `monthly_power_W`:
 
 ```python
 from solar_to_monthly import monthly_power_W, demand_from_annual
-demand = demand_from_annual(Q_annual_kWh=25_000)          # typisches Saisonprofil
-P = monthly_power_W(A_koll_m2=30.0, demand_kWh_per_month=demand,
-                    sheet="Vakuum-Röhrenkollektor", beta_deg=40)
+demand = demand_from_annual(Q_annual_kWh=25_000)   # typisches Saisonprofil
+P = monthly_power_W(A_koll_m2=30.0, demand_kWh_per_month=demand)
 CONFIG["cycles"]["monthly_power_W"] = P
 ```
 
@@ -761,6 +760,10 @@ Direkt­aufruf liefert eine Demo-Tabelle plus Hinweis auf die für
 ```
 python solar_to_monthly.py
 ```
+
+Für eine reale standort­scharfe Auslegung müssten die Werte aus
+Strahlungs­daten am konkreten Ort verwendet werden — die hier
+hinterlegten Zahlen sind als pädagogische Größen­ordnung gedacht.
 
 ![Monatsprofil-Beispiel](figures_illustrations/monthly_profile_example.png)
 

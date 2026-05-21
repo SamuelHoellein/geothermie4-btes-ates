@@ -5,4 +5,3 @@ meshio
 numpy
 pyvista>=0.45
 matplotlib
-openpyxl

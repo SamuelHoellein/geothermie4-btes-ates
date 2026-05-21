@@ -1,23 +1,27 @@
 #!/usr/bin/env python3
 """
-Berechnet aus der Berechnungshilfe-Tabelle (Solarthermie SS-2025) und einem
-monatlichen Wärme­bedarf eine 12-Werte-Liste `monthly_power_W`, die direkt in
-den `CONFIG["cycles"]["monthly_power_W"]`-Block der BTES- oder ATES-Skripte
-eingesetzt werden kann.
+Berechnet aus einem typisierten monatlichen Kollektor­ertrag und einem
+monatlichen Wärmebedarf eine 12-Werte-Liste `monthly_power_W`, die
+direkt in den `CONFIG["cycles"]["monthly_power_W"]`-Block der BTES-
+oder ATES-Skripte eingesetzt werden kann.
 
-Konzept
--------
-Eingang  : - solarer Monats­ertrag q_sol(m) [kWh/m²/Monat]   (aus xlsx)
+Konzept (grobes Substitut für eine ausführliche Solar­ertrag­rechnung)
+---------------------------------------------------------------------
+Eingang  : - typisierter monatlicher Spezifikertrag q_sol(m)
+             [kWh/m²/Monat]  — hier als Konstanten­profil hinterlegt
+             (Mitteleuropa, Vakuum-Röhrenkollektor, β ≈ 40°)
            - Kollektor­fläche A_koll [m²]
            - Wärme­bedarf Q_bed(m) [kWh/Monat]
 Bilanz   : ΔQ(m) = A_koll · q_sol(m) − Q_bed(m)   [kWh/Monat]
            + Überschuss → in den Speicher laden
            − Defizit    → aus dem Speicher fördern
-Leistung : P(m) = ΔQ(m) · 3600 · 1000 / ( days(m) · 86400 )   [W]
+Leistung : P(m) = ΔQ(m) · 3.6·10⁶ / ( d(m) · 86400 )   [W]
 
-Hinweis zur Auslegung: damit der Speicher nicht überdimensioniert wird,
-sollte die Jahres­bilanz Σ ΔQ(m) ≈ 0 gewählt werden. Das heißt A_koll wird
-so gewählt, dass A_koll · Σ q_sol(m) ≈ Σ Q_bed(m).
+Hinweis. Die hier hinterlegten q_sol-Werte sind **typische Größen­ordnungen**
+für eine südausgerichtete Vakuum-Röhrenkollektoranlage in
+Mitteleuropa und ersetzen eine ausführliche standort­scharfe
+Auslegung. Für eine reale Anlage müsste man die Strahlungs­daten am
+konkreten Standort verwenden.
 
 Verwendung
 ----------
@@ -32,92 +36,82 @@ Als Modul:
 from __future__ import annotations
 
 import sys
-from pathlib import Path
-
-try:
-    import openpyxl
-except ImportError as e:                    # pragma: no cover
-    raise SystemExit("openpyxl fehlt – installieren mit:  pip install openpyxl") from e
 
 
-XLSX_DEFAULT  = str(Path(__file__).parent / "data" / "Solarthermie_Berechnungshilfe.xlsx")
-SHEET_DEFAULT = "Vakuum-Röhrenkollektor"   # alternativ: "Flachkollektor"
-BETA_DEFAULT  = 40                         # Kollektor-Anstellwinkel [°]
+# ----------------------------------------------------------------------
+# Typisches Monats­profil: Vakuum-Röhrenkollektor, Mitteleuropa,
+# Anstellwinkel ~ 40°, Süd-Ausrichtung. Werte in kWh/m²/Monat.
+# Größen­ordnung kalibriert auf ca. 940 kWh/m²/a.
+# ----------------------------------------------------------------------
+SOLAR_YIELD_kWh_per_m2_month = [
+    31.5,   # Jan
+    48.1,   # Feb
+    74.8,   # Mrz
+   103.0,   # Apr
+   117.7,   # Mai
+   116.2,   # Jun
+   122.2,   # Jul
+   115.4,   # Aug
+    88.7,   # Sep
+    65.6,   # Okt
+    33.0,   # Nov
+    23.3,   # Dez
+]
 
 DAYS_PER_MONTH = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
 MONTHS         = ["Jan", "Feb", "Mrz", "Apr", "Mai", "Jun",
                   "Jul", "Aug", "Sep", "Okt", "Nov", "Dez"]
 
+# Typischer normierter Heiz­bedarfs­verlauf (Anteil am Jahres­bedarf),
+# Mitteleuropa, Σ = 1. Sommer minimal, Winter maximal.
+DEMAND_PROFILE_FRAC = [0.175, 0.145, 0.120, 0.080, 0.045, 0.020,
+                       0.010, 0.015, 0.040, 0.095, 0.125, 0.130]
 
-def solar_monthly_yield(xlsx_path: str | Path = XLSX_DEFAULT,
-                        sheet: str = SHEET_DEFAULT,
-                        beta_deg: float = BETA_DEFAULT) -> list[float]:
-    """Liest die 12 Monats­erträge q_sol [kWh/m²/Monat] für gewählten Anstellwinkel."""
-    wb = openpyxl.load_workbook(xlsx_path, data_only=True)
-    if sheet not in wb.sheetnames:
-        raise ValueError(f"Sheet '{sheet}' nicht in {xlsx_path}; verfügbar: {wb.sheetnames}")
-    ws = wb[sheet]
-    for row in ws.iter_rows(values_only=True):
-        if len(row) >= 14 and isinstance(row[1], (int, float)) and float(row[1]) == float(beta_deg):
-            vals = list(row[2:14])
-            if all(isinstance(v, (int, float)) for v in vals):
-                return [float(v) for v in vals]
-    raise ValueError(f"Anstellwinkel β = {beta_deg}° nicht in Sheet '{sheet}' gefunden.")
+
+def solar_monthly_yield() -> list[float]:
+    """Liefert die 12 Monats­erträge q_sol [kWh/m²/Monat]."""
+    return list(SOLAR_YIELD_kWh_per_m2_month)
 
 
 def monthly_power_W(A_koll_m2: float,
-                    demand_kWh_per_month: list[float] | tuple[float, ...],
-                    *,
-                    xlsx_path: str | Path = XLSX_DEFAULT,
-                    sheet: str = SHEET_DEFAULT,
-                    beta_deg: float = BETA_DEFAULT) -> list[float]:
+                    demand_kWh_per_month) -> list[float]:
     """
-    Liefert die 12-Werte-Liste `monthly_power_W` [W].
+    Berechnet die 12-Werte-Liste `monthly_power_W` [W].
 
     A_koll_m2            – Kollektor­fläche [m²]
     demand_kWh_per_month – Wärme­bedarf je Monat (Liste mit 12 Werten) [kWh]
     """
     if len(demand_kWh_per_month) != 12:
         raise ValueError("demand_kWh_per_month muss exakt 12 Werte enthalten.")
-    q_sol = solar_monthly_yield(xlsx_path, sheet, beta_deg)
+    q_sol = solar_monthly_yield()
     P = []
     for m in range(12):
         delta_Q_kWh = A_koll_m2 * q_sol[m] - float(demand_kWh_per_month[m])
         seconds = DAYS_PER_MONTH[m] * 86400.0
-        P.append(delta_Q_kWh * 3.6e6 / seconds)         # kWh → J, /s = W
+        P.append(delta_Q_kWh * 3.6e6 / seconds)
     return P
 
 
-def annual_balance_kWh(A_koll_m2: float,
-                        demand_kWh_per_month: list[float] | tuple[float, ...],
-                        *,
-                        xlsx_path: str | Path = XLSX_DEFAULT,
-                        sheet: str = SHEET_DEFAULT,
-                        beta_deg: float = BETA_DEFAULT) -> float:
-    """Σ_m (A · q_sol − Q_bed) – Vorzeichen-Indikator für Auslegung."""
-    q_sol = solar_monthly_yield(xlsx_path, sheet, beta_deg)
-    return A_koll_m2 * sum(q_sol) - float(sum(demand_kWh_per_month))
+def annual_balance_kWh(A_koll_m2: float, demand_kWh_per_month) -> float:
+    """Σ_m (A · q_sol − Q_bed)  — Vorzeichen-Indikator für Auslegung."""
+    return A_koll_m2 * sum(SOLAR_YIELD_kWh_per_m2_month) - float(sum(demand_kWh_per_month))
 
 
-def sizing_A_koll_for_balance(demand_kWh_per_month, *,
-                              xlsx_path: str | Path = XLSX_DEFAULT,
-                              sheet: str = SHEET_DEFAULT,
-                              beta_deg: float = BETA_DEFAULT) -> float:
+def sizing_A_koll_for_balance(demand_kWh_per_month) -> float:
     """Kollektor­fläche [m²] so, dass Jahres­bilanz exakt 0 ergibt."""
-    q_sol_year = sum(solar_monthly_yield(xlsx_path, sheet, beta_deg))
-    return float(sum(demand_kWh_per_month)) / q_sol_year
-
-
-# Typischer normierter Heiz­bedarfs­verlauf (Anteil am Jahres­bedarf), Mitteleuropa:
-DEMAND_PROFILE_FRAC = [0.175, 0.145, 0.120, 0.080, 0.045, 0.020,
-                       0.010, 0.015, 0.040, 0.095, 0.125, 0.130]
+    return float(sum(demand_kWh_per_month)) / sum(SOLAR_YIELD_kWh_per_m2_month)
 
 
 def demand_from_annual(Q_annual_kWh: float,
                        profile: list[float] = DEMAND_PROFILE_FRAC) -> list[float]:
-    """Skaliert das normierte Lastprofil (Σ = 1) auf den vorgegebenen Jahres­bedarf."""
+    """Skaliert das normierte Lastprofil (Σ = 1) auf den Jahres­bedarf."""
     s = sum(profile)
     return [Q_annual_kWh * (p / s) for p in profile]
+
+
+# Demo
+A_KOLL_DEMO   = 30.0           # m²
+Q_ANNUAL_DEMO = 25_000.0       # kWh/a
 
 
 def _print_table(q_sol, demand, P):
@@ -129,13 +123,6 @@ def _print_table(q_sol, demand, P):
               f" {P[m]:>12.1f}")
 
 
-# ----------------------------------------------------------------------
-# Demo
-# ----------------------------------------------------------------------
-A_KOLL_DEMO       = 30.0           # m² – Kollektor­fläche
-Q_ANNUAL_DEMO     = 25_000.0       # kWh/a – Jahres­wärmebedarf
-
-
 if __name__ == "__main__":
     try:
         sys.stdout.reconfigure(encoding="utf-8")
@@ -143,9 +130,10 @@ if __name__ == "__main__":
         pass
 
     print(f"Eingaben:  A_koll = {A_KOLL_DEMO} m²,  Q_jährlich = {Q_ANNUAL_DEMO:.0f} kWh")
-    print(f"Sheet      {SHEET_DEFAULT!r},  β = {BETA_DEFAULT}°")
-
-    q_sol  = solar_monthly_yield(beta_deg=BETA_DEFAULT)
+    print(f"q_sol-Profil:  Vakuum-Röhrenkollektor, Mitteleuropa, β ≈ 40°")
+    print(f"               Jahressumme = {sum(SOLAR_YIELD_kWh_per_m2_month):.0f} kWh/m²/a")
+    print()
+    q_sol  = solar_monthly_yield()
     demand = demand_from_annual(Q_ANNUAL_DEMO)
     P      = monthly_power_W(A_KOLL_DEMO, demand)
     _print_table(q_sol, demand, P)
