@@ -6,21 +6,33 @@ OpenGeoSys-Übungen zu **Borehole** und **Aquifer Thermal Energy Storage**
 📖 **Übungsskript:** siehe [`UEBUNGSSKRIPT.pdf`](UEBUNGSSKRIPT.pdf)
 (Theorie, Übungen, Aufgaben, Plot-Interpretation, ~30 Seiten).
 
+🛠️ **Neu hier / Probleme bei der Einrichtung?** Die ausführliche
+**Schritt-für-Schritt-Anleitung** (PowerShell öffnen, Software-Downloads,
+venv **oder** conda, Troubleshooting für *„ogs nicht im PATH"*) steht in
+[`INSTALLATION.md`](INSTALLATION.md).
+
 ## Schnellstart
 
-Voraussetzungen: **Python 3.10–3.12**, Windows / Linux / macOS.
+Voraussetzungen: **Python 3.10–3.12** (nicht 3.13+!), Windows / Linux / macOS.
+Ausführliche, anfängerfreundliche Variante: [`INSTALLATION.md`](INSTALLATION.md).
 
 ```bash
 git clone https://github.com/karli-a11y/geothermie4-btes-ates.git
 cd geothermie4-btes-ates
+
+# empfohlen: isolierte Umgebung (vermeidet PATH-Probleme mit ogs.exe)
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1        # Windows PowerShell
+# (Linux/macOS: source .venv/bin/activate)
+
 python -m pip install --upgrade pip
 python -m pip install -r requirements.txt
 ```
 
-`ogs.exe` muss im `PATH` auffindbar sein (wird vom `ogs`-Wheel
-automatisch in `Scripts/` installiert — Verzeichnis ggf. zu `PATH`
-hinzufügen). Windows-Hinweise zur Microsoft-Store-Python-Installation
-im Übungsskript, Abschnitt 5.
+`ogs.exe` muss im `PATH` auffindbar sein. In einer **aktivierten** venv-
+oder conda-Umgebung ist das automatisch der Fall — das ist der einfachste
+Weg, den häufigen Fehler *„ogs nicht gefunden"* zu vermeiden. Hintergründe,
+conda-Variante und Lösungen siehe [`INSTALLATION.md`](INSTALLATION.md).
 
 ## Übung starten
 
@@ -49,6 +61,7 @@ Parameter werden im `CONFIG`-Block am Anfang des Sim-Skripts editiert
 
 | Pfad                          | Inhalt                                          |
 |-------------------------------|-------------------------------------------------|
+| `INSTALLATION.md`             | Schritt-für-Schritt-Einrichtung (venv/conda, Troubleshooting) |
 | `UEBUNGSSKRIPT.{md,pdf}`      | Übungsskript (Theorie + Übungen + Aufgaben)     |
 | `btes/`, `ates/`              | Übungs-Ordner mit Sim- und Plot-Skripten        |
 | `formulas/`                   | Gerenderte LaTeX-Formelgrafiken (im Übungsskript)   |

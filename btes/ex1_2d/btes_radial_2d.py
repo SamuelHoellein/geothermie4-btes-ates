@@ -591,9 +591,13 @@ def make_plots(cfg: dict, out_dir: Path) -> None:
     t_cycle = sum(cfg["cycles"][k] for k in
                   ("charge_days","storage_after_charge_days",
                    "discharge_days","storage_after_discharge_days"))
-    z_mid = (cfg["domain"]["z_base_m"]
-             + cfg["layers"]["soil_bottom_thickness_m"]
-             + cfg["layers"]["borehole_zone_thickness_m"]/2)
+    # Sondenmitte in interner z-Koordinate (Oberfläche bei z_total, Boden bei 0).
+    # `layers` ist eine Liste von Schichten -> Gesamttiefe = Summe der Dicken;
+    # Sondentiefen werden von der Oberfläche nach unten gemessen.
+    z_total = sum(L["thickness_m"] for L in cfg["layers"])
+    bh      = cfg["borehole"]
+    z_mid   = z_total - 0.5 * (bh["depth_top_m"] + bh["depth_bottom_m"])
+    bh_half = 0.5 * (bh["depth_bottom_m"] - bh["depth_top_m"])
 
     def file_for(day):
         return min(files, key=lambda p: abs(int(re.search(r"_t_(\d+)", p.name).group(1))/DAY - day))
@@ -635,7 +639,7 @@ def make_plots(cfg: dict, out_dir: Path) -> None:
         "r=2 m":                    (2.0,  z_mid, 0),
         "r=5 m":                    (5.0,  z_mid, 0),
         "r=15 m":                   (15.0, z_mid, 0),
-        "Cover 2 m über BHE":       (1.0,  z_mid + cfg["layers"]["borehole_zone_thickness_m"]/2 + 2, 0),
+        "Cover 2 m über BHE":       (1.0,  z_mid + bh_half + 2, 0),
     }
     times, series = [], {k: [] for k in probes}
     for f in files:
