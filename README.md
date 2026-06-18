@@ -10,7 +10,7 @@ OpenGeoSys-Übungen zu **Borehole** und **Aquifer Thermal Energy Storage**
 > hakt — besonders bei den im [Troubleshooting](#7-häufige-probleme--troubleshooting)
 > genannten Fehlern — meldet euch **gerne jederzeit** bei mir:
 > **holler@geo.tu-darmstadt.de**. Lieber einmal kurz fragen, als eine Stunde
-> mit einem PATH-Problem zu kämpfen. 🙂
+> mit einem PATH-Problem zu kämpfen.
 
 ---
 
