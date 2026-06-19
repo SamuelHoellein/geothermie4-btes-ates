@@ -566,24 +566,37 @@ def build_prj(cfg: dict, out_dir: Path, mesh_files: dict[str, str], curves: dict
     td = _se(p_ref, "time_discretization")
     _se(td, "type", "BackwardEuler")
 
+    # Adaptive Zeitschrittweite: IterationNumberBasedTimeStepping kann die
+    # Schrittweite bei Nichtkonvergenz reduzieren (und danach wieder
+    # erhöhen) — anders als FixedTimeStepping, das an harten Phasen-
+    # übergängen (Flussumkehr + Dirichlet-T-Sprung am Brunnen) sonst
+    # abbricht ("Time stepper cannot reduce the time step size further").
+    # Normalbetrieb bleibt beim 1-Tages-Schritt (maximum_dt = dt0).
+    dt0 = cfg["time"]["dt_seconds"]
     ts = _se(p_ref, "time_stepping")
-    _se(ts, "type",      "FixedTimeStepping")
-    _se(ts, "t_initial", 0.0)
-    _se(ts, "t_end",     curves["t_total"])
-    steps = _se(ts, "timesteps")
-    pair = _se(steps, "pair")
-    n_steps = int(np.ceil(curves["t_total"] / cfg["time"]["dt_seconds"]))
-    _se(pair, "repeat",  n_steps)
-    _se(pair, "delta_t", cfg["time"]["dt_seconds"])
+    _se(ts, "type",        "IterationNumberBasedTimeStepping")
+    _se(ts, "t_initial",   0.0)
+    _se(ts, "t_end",       curves["t_total"])
+    _se(ts, "initial_dt",  dt0)
+    _se(ts, "minimum_dt",  dt0 / 64.0)   # erlaubt Reduktion an den Übergängen
+    _se(ts, "maximum_dt",  dt0)          # nie gröber als der Standard-Schritt
+    # Bei wenigen Nichtlinear-Iterationen wächst dt (bis maximum_dt), bei
+    # vielen schrumpft es; bei Nichtkonvergenz wird der Schritt verworfen
+    # und mit kleinerem dt wiederholt.
+    _se(ts, "number_iterations", "1 4 8 12")
+    _se(ts, "multiplier",        "1.5 1.0 0.5 0.25")
 
-    # -- Output
+    # -- Output: feste Ausgabezeitpunkte -> gleichmäßige Snapshots,
+    #    unabhängig von der jetzt variablen Schrittweite.
+    out_step = dt0 * cfg["time"]["output_every_n_steps"]
+    n_out    = int(np.ceil(curves["t_total"] / out_step))
+    out_times = sorted(set(
+        [0.0] + [min((k + 1) * out_step, curves["t_total"]) for k in range(n_out)]
+    ))
     out = _se(tl, "output")
     _se(out, "type",   "VTK")
     _se(out, "prefix", prefix)
-    out_steps = _se(out, "timesteps")
-    pair = _se(out_steps, "pair")
-    _se(pair, "repeat",     n_steps)
-    _se(pair, "each_steps", cfg["time"]["output_every_n_steps"])
+    _se(out, "fixed_output_times", " ".join(f"{t:.6f}" for t in out_times))
     _se(out, "output_iteration_results", "false")
     vars_el = _se(out, "variables")
     for v in cfg["output"]["variables"]:
