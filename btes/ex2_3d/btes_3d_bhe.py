@@ -132,9 +132,11 @@ CONFIG: dict = {
             "reference_temperature_K":         295.15,
         },
         "control": {
-            # Typ: "FixedPowerConstantFlow"     — feste Leistung + Flow
-            #      "FixedTemperatureFlowCurve" — vorgegebene Inlet-T(t)
-            #      "BuildingPowerCurve"        — zeitabhängige Leistung
+            # Typ: "FixedPowerConstantFlow" — feste Leistung + konstanter Flow.
+            # Hinweis: Wird cycles.monthly_power_W gesetzt (Lastprofil), schaltet
+            # das Skript automatisch auf das OGS-Steuerungsmodell
+            # "PowerCurveConstantFlow" um (zeitabhängige Leistungskurve bei
+            # konstantem Durchfluss) und ignoriert power_W.
             "type":             "FixedPowerConstantFlow",
             "power_W":           2000.0,    # + = laden, - = fördern
             "flow_rate_kg_s":    0.2,
@@ -153,6 +155,13 @@ CONFIG: dict = {
         "discharge_days":              91.25,
         "storage_after_discharge_days":91.25,
         "ramp_days":                    7.0,
+        # --- Modus B: Monatsprofil (auf None für den 4-Phasen-Default) ---
+        # Liste von 12 Monatsleistungen [W] je Sonde (+ = laden, - = fördern,
+        # 0 = Stillstand). Aktiv ≠ None: dann wird über das OGS-Steuerungsmodell
+        # PowerCurveConstantFlow eine zeitabhängige Leistungskurve eingespeist.
+        # Jeder Monat dauert 365.25/12 ≈ 30.44 d, n_cycles = Anzahl Jahre.
+        # Beispiel:  "monthly_power_W": [+2000]*6 + [-2000]*6,
+        "monthly_power_W":              None,
     },
     "time": {
         "dt_seconds":          7 * 86400.0,
@@ -172,6 +181,33 @@ CONFIG: dict = {
 }
 
 DAY = 86400.0
+
+
+def build_power_curve(cfg: dict):
+    """Leistungskurve [W] aus cycles.monthly_power_W für PowerCurveConstantFlow.
+
+    Liefert (t_total, (times, vals)) mit absoluten Leistungen [W] je Sonde
+    (gleiches Vorzeichen wie bhe.control.power_W: + = laden, - = fördern).
+    Jeder Monat dauert 365.25/12 d, mit sanften Rampen (ramp_days) zwischen den
+    Monaten. Gibt None zurück, wenn kein Monatsprofil gesetzt ist.
+    """
+    monthly = cfg["cycles"].get("monthly_power_W")
+    if monthly is None:
+        return None
+    assert len(monthly) == 12, "cycles.monthly_power_W muss 12 Werte enthalten."
+    n         = cfg["cycles"]["n_cycles"]
+    ramp      = max(60.0, cfg["cycles"]["ramp_days"] * DAY)
+    month_dur = 365.25 / 12.0 * DAY      # ~30.44 d
+    times = [0.0]; vals = [0.0]; t_now = 0.0
+    for _ in range(n):
+        for P_month in monthly:
+            P = float(P_month)
+            t_now += ramp; times.append(t_now); vals.append(P)
+            hold = max(0.0, month_dur - ramp)
+            if hold > 0.0:
+                t_now += hold; times.append(t_now); vals.append(P)
+    t_now += ramp; times.append(t_now); vals.append(0.0)
+    return t_now, (np.array(times), np.array(vals))
 
 
 # ======================================================================
@@ -356,14 +392,20 @@ def _bhe_xml(parent, cfg: dict, n_bhe: int) -> None:
         _se(b, "type", bhe["type"])
         # Strömungs-/Temperatur-Steuerung
         ftc = _se(b, "flow_and_temperature_control")
-        _se(ftc, "type", bhe["control"]["type"])
-        if bhe["control"]["type"] == "FixedPowerConstantFlow":
-            _se(ftc, "power",     bhe["control"]["power_W"])
-            # OGS erwartet einen VOLUMETRISCHEN Durchfluss [m^3/s], nicht kg/s.
-            # Umrechnung ueber die Refrigerant-Dichte (sonst ~1000x zu hoch ->
-            # Refrigerant-DeltaT ~ 0 -> keine Waermekopplung).
-            _flow_vol = bhe["control"]["flow_rate_kg_s"] / bhe["refrigerant"]["density_kg_m3"]
+        # OGS erwartet einen VOLUMETRISCHEN Durchfluss [m^3/s], nicht kg/s.
+        # Umrechnung ueber die Refrigerant-Dichte (sonst ~1000x zu hoch ->
+        # Refrigerant-DeltaT ~ 0 -> keine Waermekopplung).
+        _flow_vol = bhe["control"]["flow_rate_kg_s"] / bhe["refrigerant"]["density_kg_m3"]
+        if cfg["cycles"].get("monthly_power_W") is not None:
+            # Modus B: zeitabhängige Leistungskurve bei konstantem Durchfluss.
+            _se(ftc, "type", "PowerCurveConstantFlow")
+            _se(ftc, "power_curve", "power_curve")
             _se(ftc, "flow_rate", _flow_vol)
+        else:
+            _se(ftc, "type", bhe["control"]["type"])
+            if bhe["control"]["type"] == "FixedPowerConstantFlow":
+                _se(ftc, "power",     bhe["control"]["power_W"])
+                _se(ftc, "flow_rate", _flow_vol)
         # Bohrloch
         bh = _se(b, "borehole")
         _se(bh, "length",   L_bhe)
@@ -396,10 +438,16 @@ def build_prj(cfg: dict, out_dir: Path, mesh_files: dict) -> Path:
     prefix = cfg["output"]["prefix"]
     fluid, init, sol = cfg["fluid"], cfg["initial"], cfg["solver"]
     n_bhe = len(_bhe_positions(cfg))
-    n_steps = int((sum([cfg["cycles"][k] for k in
-                        ("charge_days","storage_after_charge_days",
-                         "discharge_days","storage_after_discharge_days")])
-                   * cfg["cycles"]["n_cycles"] * DAY) // cfg["time"]["dt_seconds"]) + 1
+
+    # Simulationsdauer: Monatsprofil (Modus B) oder 4-Phasen-Zyklus (Modus A).
+    power_curve = build_power_curve(cfg)
+    if power_curve is not None:
+        t_end = power_curve[0]
+    else:
+        t_end = cfg["cycles"]["n_cycles"] * sum(cfg["cycles"][k] for k in
+            ("charge_days","storage_after_charge_days",
+             "discharge_days","storage_after_discharge_days")) * DAY
+    n_steps = int(t_end // cfg["time"]["dt_seconds"]) + 1
 
     root = ET.Element("OpenGeoSysProject")
     meshes = _se(root, "meshes")
@@ -468,10 +516,7 @@ def build_prj(cfg: dict, out_dir: Path, mesh_files: dict) -> Path:
     ts = _se(pref, "time_stepping")
     _se(ts, "type", "FixedTimeStepping")
     _se(ts, "t_initial", 0)
-    _se(ts, "t_end",
-        cfg["cycles"]["n_cycles"] * sum(cfg["cycles"][k] for k in
-            ("charge_days","storage_after_charge_days",
-             "discharge_days","storage_after_discharge_days")) * DAY)
+    _se(ts, "t_end", t_end)
     tsteps = _se(ts, "timesteps")
     pair = _se(tsteps, "pair")
     _se(pair, "repeat", n_steps); _se(pair, "delta_t", cfg["time"]["dt_seconds"])
@@ -533,6 +578,15 @@ def build_prj(cfg: dict, out_dir: Path, mesh_files: dict) -> Path:
     eig = _se(ls, "eigen"); _se(eig, "solver_type", "BiCGSTAB")
     _se(eig, "precon_type", "ILUT"); _se(eig, "max_iteration_step", sol["linear_iter"])
     _se(eig, "error_tolerance", sol["linear_tol"]); _se(eig, "scaling", "true")
+
+    # Curves — Leistungsprofil für PowerCurveConstantFlow (nur Modus B)
+    if power_curve is not None:
+        t, v = power_curve[1]
+        curves = _se(root, "curves")
+        c = _se(curves, "curve")
+        _se(c, "name", "power_curve")
+        _se(c, "coords", " ".join(f"{x:.6e}" for x in t))
+        _se(c, "values", " ".join(f"{x:.6e}" for x in v))
 
     _indent(root)
     prj_path = out_dir / f"{prefix}.prj"
