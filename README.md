@@ -267,6 +267,26 @@ cd geothermie4-btes-ates
 > `cd geothermie4-btes-ates`, dann `python -m venv .venv` — so liegt die
 > Umgebung im Projektordner.
 
+### Updates ziehen (bei Korrekturen/Erweiterungen)
+
+Das Repo wird gelegentlich aktualisiert (Fehlerkorrekturen, neue Features in
+den Skripten). Wer **mit Git geklont** hat, holt sich den neuesten Stand im
+Projektordner mit:
+
+```powershell
+git pull
+```
+
+> 💡 Eigene Änderungen an den `CONFIG`-Blöcken können dabei kollidieren
+> (`error: Your local changes … would be overwritten`). Dann entweder die
+> eigene Version sichern (`git stash`, ziehen, `git stash pop`) oder die
+> Datei vor dem `git pull` unter neuem Namen kopieren. Die `.venv`-Umgebung
+> und die `out`-/`figures`-Ergebnisordner sind nicht versioniert und bleiben
+> beim Update unberührt.
+>
+> **ZIP-Variante:** Wer ohne Git gearbeitet hat, lädt für ein Update einfach
+> erneut das aktuelle ZIP herunter ([Abschnitt 5](#5-repository-herunterladen)).
+
 ---
 
 ## 6. Eine Übung rechnen & prüfen
