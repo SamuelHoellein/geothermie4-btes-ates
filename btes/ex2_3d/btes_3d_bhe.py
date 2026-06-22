@@ -160,7 +160,9 @@ CONFIG: dict = {
         # 0 = Stillstand). Aktiv ≠ None: dann wird über das OGS-Steuerungsmodell
         # PowerCurveConstantFlow eine zeitabhängige Leistungskurve eingespeist.
         # Jeder Monat dauert 365.25/12 ≈ 30.44 d, n_cycles = Anzahl Jahre.
-        # Beispiel:  "monthly_power_W": [+2000]*6 + [-2000]*6,
+        # Beispiel (Beladung Sommer, Förderung Winter):
+        #   "monthly_power_W": [+2000, +2000, +1500, +500, 0, 0,
+        #                         0, 0, -1500, -2500, -3000, -2500],
         "monthly_power_W":              None,
     },
     "time": {

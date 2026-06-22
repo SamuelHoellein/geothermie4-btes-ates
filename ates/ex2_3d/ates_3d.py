@@ -161,8 +161,9 @@ CONFIG: dict = {
         "storage_after_discharge_days": 0,     # Phase 4: Pause nach Förderung (Tage)
         "ramp_days":                    1.0,   # Sanfte Übergangsrampe zwischen Phasen (Tage)
         # --- Modus B: Monatsprofil (auf None für Modus A) ---
-        # Beispiel: 6 Monate laden, 6 Monate fördern
-        #   "monthly_power_W": [+80_000]*6 + [-80_000]*6,
+        # Beispiel (Beladung Sommer, Förderung Winter):
+        #   "monthly_power_W": [+80_000, +60_000, +30_000, 0, 0, 0,
+        #                         0, 0, -30_000, -60_000, -90_000, -90_000],
         "monthly_power_W":              None,
         "monthly_T_inj_K":              None,   # optional: 12 Vorlauftemperaturen [K]
     },
