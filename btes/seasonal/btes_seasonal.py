@@ -772,12 +772,24 @@ def build_prj(cfg: dict, out_dir: Path, mesh_files: dict) -> Path:
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def run_ogs(prj_path: Path) -> int:
-    ogs = shutil.which("ogs") or shutil.which("ogs.exe")
-    if not ogs:
-        print("WARNUNG: 'ogs' nicht im PATH. Setup abgeschlossen, kein Lauf.",
-              file=sys.stderr)
-        return 1
-    return subprocess.call([ogs, str(prj_path), "-o", str(prj_path.parent)])
+    ogs_exe = shutil.which("ogs") or shutil.which("ogs.exe")
+    if ogs_exe:
+        cmd = [ogs_exe, str(prj_path), "-o", str(prj_path.parent)]
+    else:
+        # Fallback: ogs als Python-Modul aufrufen (funktioniert auch ohne
+        # aktiviertes venv/conda, solange ogs im selben Python installiert ist)
+        try:
+            subprocess.check_call([sys.executable, "-m", "ogs", "--version"],
+                                  stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            cmd = [sys.executable, "-m", "ogs", str(prj_path),
+                   "-o", str(prj_path.parent)]
+        except (subprocess.CalledProcessError, FileNotFoundError):
+            print("FEHLER: 'ogs' weder im PATH noch als Python-Modul gefunden.\n"
+                  "  -> conda activate ghe23  (oder die passende Umgebung aktivieren)\n"
+                  "  -> dann das Skript erneut starten.",
+                  file=sys.stderr)
+            return 1
+    return subprocess.call(cmd)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
