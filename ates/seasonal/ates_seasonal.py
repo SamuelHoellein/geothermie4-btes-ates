@@ -1,21 +1,22 @@
 #!/usr/bin/env python3
 # coding: utf-8
 """
-Saisonaler BTES-Solarspeicher  —  OGS HEAT_CONDUCTION + Neumann-Linienquellen
+Saisonaler ATES-Solarspeicher  —  OGS HEAT_CONDUCTION + Neumann-Linienquellen
 
-Jede Sonde wird als 1D-Linienwärmequelle [W/m] modelliert (kein Rohr-/Grout-Modell).
+Eine Doublette (Warmbrunnen + Kaltbrunnen, Abstand 120 m) im Aquifer (84–122 m).
+Grundwasserfluss = 0. Warmbrunnen und Kaltbrunnen haben stets entgegengesetzte Leistung.
 
 Ablauf:
-  1. Energiebilanz aus CSVs → monatliche Leistung je Sonde [W]
-  2. Mesh (gmsh): geschichtetes 3D-Gebiet + 1D-Sondenlinien
+  1. Energiebilanz aus CSVs → monatliche Leistung je Doublette [W]
+  2. Mesh (gmsh): geschichtetes 3D-Gebiet + 2 × 1D-Brunnenlinien im Aquifer
   3. .msh → .vtu (ogstools)
   4. OGS-Projektdatei (.prj) schreiben
   5. OGS starten → Ergebnisse in out/<szenario>/ als *.pvd
 
 Verwendung:
-  python btes_seasonal.py
-  python btes_seasonal.py --scenario after_renovation
-  python btes_seasonal.py --no-mesh --no-run
+  python ates_seasonal.py
+  python ates_seasonal.py --scenario after_renovation
+  python ates_seasonal.py --no-mesh --no-run
 """
 
 import argparse
@@ -35,34 +36,30 @@ import numpy as np
 # Nutzereinstellungen
 COP                  = 4.0
 T_GROUND_INITIAL_C   = 10.0
-DEFAULT_SCENARIO     = "after_renovation"
+DEFAULT_SCENARIO     = "before_renovation"
 
+WELL_SPACING_M        = 120.0   # Abstand Warm- zu Kaltbrunnen [m]
+N_DOUBLETS            = 1       # Anzahl Doubletten (Energiebilanz)
+AQUIFER_TOP_M         = 84.0    # Aquifer-Oberkante [m u. GOK]
+AQUIFER_BOTTOM_M      = 122.0   # Aquifer-Unterkante [m u. GOK]
+DOMAIN_BUFFER_M       = 100.0   # seitlicher Puffer über Brunnenfeld hinaus [m]
+DOMAIN_DEPTH_BUFFER_M = 25.0    # Puffer unterhalb Aquifer [m]
 
+POROSITY_DEFAULT = 0.02
+FLUID_LAMBDA     = 0.6          # Wärmeleitfähigkeit Porenwasser [W/mK]
+RAMP_DAYS        = 3
 
-N_BHE_X                 =   12
-N_BHE_Y                 =   12
-N_BOREHOLES_TOTAL       = N_BHE_X * N_BHE_Y 
-BOREHOLE_SPACING_M      =  8.0
-BOREHOLE_DEPTH_TOP_M    =  5.0
-BOREHOLE_DEPTH_BOTTOM_M = 159
-DOMAIN_BUFFER_M         = 25.0
-DOMAIN_DEPTH_BUFFER_M   = 25.0
-
-POROSITY_DEFAULT = 0.02      # Fallback-Porosität falls CSV-Wert fehlt
-FLUID_LAMBDA     = 0.6       # Wärmeleitfähigkeit Porenwasser [W/mK]
-RAMP_DAYS        = 3         # Übergangsrampe zwischen Monaten [Tage]
-
-N_YEARS    = 1
+N_YEARS    = 3
 DT_SECONDS = 30 * 86400.0
 
-MESH_SIZE_NEAR_M   = 1.5
-MESH_SIZE_FAR_M    = 12.0
-MESH_RADIUS_NEAR_M = 8.0
-MESH_RADIUS_FAR_M  = 30.0
+MESH_SIZE_NEAR_M   = 3.0
+MESH_SIZE_FAR_M    = 20.0
+MESH_RADIUS_NEAR_M = 15.0
+MESH_RADIUS_FAR_M  = 60.0
 
 LINEAR_TOL     = 1.0e-12
 LINEAR_ITER    = 10000
-NONLINEAR_ITER = 2   # HEAT_CONDUCTION ist linear → 2 Picard-Iterationen: Iter 1 löst, Iter 2 bestätigt ΔX≈0
+NONLINEAR_ITER = 2
 
 _ROOT    = Path(__file__).resolve().parent.parent.parent
 DATA_DIR = _ROOT / "Data Input"
@@ -95,16 +92,17 @@ def load_demand(scenario):
 
 def compute_monthly_powers(scenario):
     """
-    Monatliche Nettoleistung [W] je Sonde.
+    Monatliche Nettoleistung [W] je Doublette (Warmbrunnen-Seite).
       WP-Entzug = Heizlast × (1 − 1/COP)
       E_net = E_solar − WP-Entzug
-      P [W] = E_net [kWh] × 1000 [W/kW] / (Tage × 24 h) / N_BOREHOLES_TOTAL
-    P > 0 = Laden, P < 0 = Entladen.
+      P [W] = E_net [kWh] × 1000 [W/kW] / (Tage × 24 h) / N_DOUBLETS
+    P > 0 = Laden (Wärme in Warmbrunnen), P < 0 = Entladen.
+    Kaltbrunnen hat stets −P.
     """
     solar  = load_solar()
     hp_ext = load_demand(scenario) * (1.0 - 1.0 / COP)
     net    = solar - hp_ext
-    power_W = [net[i] * 1000.0 / (MONTH_DAYS[i] * 24.0) / N_BOREHOLES_TOTAL
+    power_W = [net[i] * 1000.0 / (MONTH_DAYS[i] * 24.0) / N_DOUBLETS
                for i in range(12)]
     return power_W, {"solar": solar, "hp_ext": hp_ext, "net": net}
 
@@ -112,32 +110,25 @@ def compute_monthly_powers(scenario):
 def print_energy_balance(power_W, info, scenario):
     label = "vor Sanierung" if scenario == "before_renovation" else "nach Sanierung"
     s, hp, n = info["solar"], info["hp_ext"], info["net"]
-    print(f"\n{'='*62}")
-    print(f"  BTES Energiebilanz [{label}]")
-    print(f"{'='*62}")
-    print(f"  {'Monat':<5} {'Solar':>8} {'WP-Entzug':>11} {'Netto':>9} {'P/Sonde':>9}")
-    print(f"  {'':5} {'[MWh]':>8} {'[MWh]':>11} {'[MWh]':>9} {'[W]':>9}")
-    print("  " + "-"*46)
+    print(f"\n{'='*64}")
+    print(f"  ATES Energiebilanz [{label}]")
+    print(f"{'='*64}")
+    print(f"  {'Monat':<5} {'Solar':>8} {'WP-Entzug':>11} {'Netto':>9} {'P/Doublette':>13}")
+    print(f"  {'':5} {'[MWh]':>8} {'[MWh]':>11} {'[MWh]':>9} {'[W]':>13}")
+    print("  " + "-"*49)
     for i in range(12):
         print(f"  {MONTH_NAMES[i]:<5} {s[i]/1e3:>8.1f} {hp[i]/1e3:>11.1f}"
-              f" {n[i]/1e3:>9.1f} {power_W[i]:>9.0f}")
+              f" {n[i]/1e3:>9.1f} {power_W[i]:>13.0f}")
     print(f"  {'Summe':<5} {s.sum()/1e3:>8.1f} {hp.sum()/1e3:>11.1f} {n.sum()/1e3:>9.1f}")
     print(f"\n  Solardeckung WP-Entzug: {s.sum()/hp.sum()*100:.1f}%"
-          f"   Max. Laden: +{max(power_W):.0f} W/Sonde"
-          f"   Max. Entladen: {min(power_W):.0f} W/Sonde")
-    print(f"{'='*62}\n")
+          f"   Max. Laden: +{max(power_W):.0f} W"
+          f"   Max. Entladen: {min(power_W):.0f} W")
+    print(f"{'='*64}\n")
 
 
 # Geologische Schichten
 
 def build_layers_from_csv(domain_depth_m):
-    """
-    Liest Ground_1.csv. Einheitenumrechnung:
-      cv    [MJ/(m³·K)] × 1e6  → [J/(m³·K)]
-      rho_s [g/cm³]    × 1000  → [kg/m³]
-      phi   [%]        / 100   → [-]
-    Fehlende/ungültige Werte ('<'-Präfix, leer) werden durch Defaultwerte ersetzt.
-    """
     rows = _read_csv(DATA_DIR / "Ground_1.csv")
     keys = list(rows[0].keys())
 
@@ -153,15 +144,16 @@ def build_layers_from_csv(domain_depth_m):
     for i, z_top in enumerate(depths):
         if z_top is None or z_top >= domain_depth_m:
             break
-        next_depth = depths[i+1] if i+1 < len(depths) and depths[i+1] is not None else domain_depth_m
+        next_depth = (depths[i+1] if i+1 < len(depths) and depths[i+1] is not None
+                      else domain_depth_m)
         z_bot = min(next_depth, domain_depth_m)
         h = z_bot - z_top
         if h <= 0:
             continue
         lam   = _f(rows[i], 1, 2.0)
-        cv    = _f(rows[i], 3, 1.8) * 1e6   # MJ/m³K → J/m³K
-        rho_s = _f(rows[i], 4, 2.65) * 1000  # g/cm³  → kg/m³
-        phi   = _f(rows[i], 6, 10.0) / 100   # %      → [-]
+        cv    = _f(rows[i], 3, 1.8) * 1e6
+        rho_s = _f(rows[i], 4, 2.65) * 1000
+        phi   = _f(rows[i], 6, 10.0) / 100
         layers.append({
             "name"       : f"layer_{i:02d}",
             "thickness_m": float(h),
@@ -178,27 +170,27 @@ def build_layers_from_csv(domain_depth_m):
 def build_config(scenario):
     power_W, info = compute_monthly_powers(scenario)
     print_energy_balance(power_W, info, scenario)
-    layers = build_layers_from_csv(BOREHOLE_DEPTH_BOTTOM_M + DOMAIN_DEPTH_BUFFER_M)
+    layers = build_layers_from_csv(AQUIFER_BOTTOM_M + DOMAIN_DEPTH_BUFFER_M)
     return {
-        "prefix"  : f"btes_{scenario}",
-        "domain"  : {
-            "Lx"    : (N_BHE_X - 1) * BOREHOLE_SPACING_M + 2 * DOMAIN_BUFFER_M,
-            "Ly"    : (N_BHE_Y - 1) * BOREHOLE_SPACING_M + 2 * DOMAIN_BUFFER_M,
+        "prefix" : f"ates_{scenario}",
+        "domain" : {
+            "Lx"    : WELL_SPACING_M + 2 * DOMAIN_BUFFER_M,
+            "Ly"    : 2 * DOMAIN_BUFFER_M,
             "z_base": 0.0,
         },
-        "layers"  : layers,
-        "borehole": {
-            "top"     : BOREHOLE_DEPTH_TOP_M,
-            "bottom"  : BOREHOLE_DEPTH_BOTTOM_M,
-            "L_active": BOREHOLE_DEPTH_BOTTOM_M - BOREHOLE_DEPTH_TOP_M,
+        "layers" : layers,
+        "aquifer": {
+            "top"     : AQUIFER_TOP_M,
+            "bottom"  : AQUIFER_BOTTOM_M,
+            "L_active": AQUIFER_BOTTOM_M - AQUIFER_TOP_M,
         },
-        "field"   : {"nx": N_BHE_X, "ny": N_BHE_Y, "spacing": BOREHOLE_SPACING_M},
-        "mesh"    : {"near": MESH_SIZE_NEAR_M, "far": MESH_SIZE_FAR_M,
-                     "r_near": MESH_RADIUS_NEAR_M, "r_far": MESH_RADIUS_FAR_M},
-        "T0_K"    : T_GROUND_INITIAL_C + 273.15,
-        "cycles"  : {"n": N_YEARS, "power_W": power_W, "ramp_days": RAMP_DAYS},
-        "time"    : {"dt": DT_SECONDS},
-        "solver"  : {"tol": LINEAR_TOL, "iter_lin": LINEAR_ITER, "iter_nl": NONLINEAR_ITER},
+        "doublet": {"spacing": WELL_SPACING_M},
+        "mesh"   : {"near": MESH_SIZE_NEAR_M, "far": MESH_SIZE_FAR_M,
+                    "r_near": MESH_RADIUS_NEAR_M, "r_far": MESH_RADIUS_FAR_M},
+        "T0_K"   : T_GROUND_INITIAL_C + 273.15,
+        "cycles" : {"n": N_YEARS, "power_W": power_W, "ramp_days": RAMP_DAYS},
+        "time"   : {"dt": DT_SECONDS},
+        "solver" : {"tol": LINEAR_TOL, "iter_lin": LINEAR_ITER, "iter_nl": NONLINEAR_ITER},
     }
 
 
@@ -214,15 +206,7 @@ def msh2vtu(msh_path, out_dir, prefix):
         mesh.save(str(out_dir / fname), binary=True)
 
 
-def _bhe_positions(cfg):
-    nx, ny, sp = cfg["field"]["nx"], cfg["field"]["ny"], cfg["field"]["spacing"]
-    xs = (np.arange(nx) - (nx - 1) / 2.0) * sp
-    ys = (np.arange(ny) - (ny - 1) / 2.0) * sp
-    return [(float(x), float(y)) for y in ys for x in xs]
-
-
 def _layer_stack(cfg):
-    """Wandelt top-down-Schichten in bottom-up z-Koordinaten um."""
     z, out = cfg["domain"]["z_base"], []
     for L in reversed(cfg["layers"]):
         h = float(L["thickness_m"])
@@ -232,27 +216,30 @@ def _layer_stack(cfg):
 
 
 def build_mesh(cfg, out_dir):
-    prefix  = cfg["prefix"]
+    prefix = cfg["prefix"]
     msh_out = out_dir / f"{prefix}.msh"
     Lx, Ly  = cfg["domain"]["Lx"], cfg["domain"]["Ly"]
     z_base  = cfg["domain"]["z_base"]
     x0, y0  = -Lx / 2.0, -Ly / 2.0
     layers, z_top = _layer_stack(cfg)
-    bhe_pos = _bhe_positions(cfg)
-    z_bhe_top = z_top - cfg["borehole"]["top"]
-    z_bhe_bot = z_top - cfg["borehole"]["bottom"]
+    aq  = cfg["aquifer"]
+    sp  = cfg["doublet"]["spacing"]
+    z_well_top = z_top - aq["top"]
+    z_well_bot = z_top - aq["bottom"]
     m = cfg["mesh"]
+
+    well_pos = [(-sp / 2.0, 0.0), (sp / 2.0, 0.0)]  # warm, cold
 
     gmsh.initialize()
     gmsh.option.setNumber("General.Terminal", 0)
-    gmsh.model.add("btes")
+    gmsh.model.add("ates")
 
     boxes = [gmsh.model.occ.addBox(x0, y0, L["z_low"], Lx, Ly, L["z_high"] - L["z_low"])
              for L in layers]
     lines = []
-    for x, y in bhe_pos:
-        p1 = gmsh.model.occ.addPoint(x, y, z_bhe_top)
-        p2 = gmsh.model.occ.addPoint(x, y, z_bhe_bot)
+    for x, y in well_pos:
+        p1 = gmsh.model.occ.addPoint(x, y, z_well_top)
+        p2 = gmsh.model.occ.addPoint(x, y, z_well_bot)
         lines.append(gmsh.model.occ.addLine(p1, p2))
 
     gmsh.model.occ.fragment([(3, b) for b in boxes], [(1, l) for l in lines])
@@ -266,31 +253,32 @@ def build_mesh(cfg, out_dir):
             if L["z_low"] - 1e-6 <= zc <= L["z_high"] + 1e-6:
                 vol_layer[i].append(tag); break
 
-    pos = np.array(bhe_pos)
-    seg_bhe, all_segs = {i: [] for i in range(len(bhe_pos))}, []
+    pos = np.array(well_pos)
+    seg_well = {i: [] for i in range(2)}
+    all_segs = []
     for _, tag in gmsh.model.getEntities(1):
         bb = gmsh.model.occ.getBoundingBox(1, tag)
         dx, dy, dz = bb[3]-bb[0], bb[4]-bb[1], bb[5]-bb[2]
         xc, yc, zc = 0.5*(bb[0]+bb[3]), 0.5*(bb[1]+bb[4]), 0.5*(bb[2]+bb[5])
-        if dx < 1e-6 and dy < 1e-6 and dz > 1e-9 and z_bhe_bot-1e-3 <= zc <= z_bhe_top+1e-3:
-            j = int(np.argmin(np.hypot(pos[:,0]-xc, pos[:,1]-yc)))
-            if np.hypot(pos[j,0]-xc, pos[j,1]-yc) < 1e-3:
-                seg_bhe[j].append(tag); all_segs.append(tag)
+        if dx < 1e-6 and dy < 1e-6 and dz > 1e-9 and z_well_bot-1e-3 <= zc <= z_well_top+1e-3:
+            j = int(np.argmin(np.hypot(pos[:, 0]-xc, pos[:, 1]-yc)))
+            if np.hypot(pos[j, 0]-xc, pos[j, 1]-yc) < 1e-3:
+                seg_well[j].append(tag); all_segs.append(tag)
 
-    if any(not s for s in seg_bhe.values()):
-        raise RuntimeError("Mindestens eine Sonde ohne Liniensegment.")
+    if any(not s for s in seg_well.values()):
+        raise RuntimeError("Mindestens ein Brunnen ohne Liniensegment.")
 
     pg = 1
     for i, L in enumerate(layers):
         gmsh.model.addPhysicalGroup(3, vol_layer[i], tag=pg, name=L["name"]); pg += 1
-    for i in range(len(bhe_pos)):
-        gmsh.model.addPhysicalGroup(1, seg_bhe[i], tag=pg, name=f"bhe_{i:02d}"); pg += 1
+    gmsh.model.addPhysicalGroup(1, seg_well[0], tag=pg, name="well_warm"); pg += 1
+    gmsh.model.addPhysicalGroup(1, seg_well[1], tag=pg, name="well_cold"); pg += 1
 
     top_f, bot_f = [], []
     for _, tag in gmsh.model.getEntities(2):
         bb = gmsh.model.occ.getBoundingBox(2, tag)
         zc, w = 0.5*(bb[2]+bb[5]), bb[3]-bb[0]
-        if w >= 0.9*Lx:
+        if w >= 0.9 * Lx:
             if   abs(zc - z_top)  < 1e-6: top_f.append(tag)
             elif abs(zc - z_base) < 1e-6: bot_f.append(tag)
     gmsh.model.addPhysicalGroup(2, top_f, tag=200, name="top")
@@ -304,10 +292,10 @@ def build_mesh(cfg, out_dir):
         gmsh.model.mesh.field.setNumber(ft, k, v)
     gmsh.model.mesh.field.setAsBackgroundMesh(ft)
 
-    bhe_pts = [(0, t) for tag in all_segs
-               for dim, t in gmsh.model.getBoundary([(1, tag)], oriented=False) if dim == 0]
-    if bhe_pts:
-        gmsh.model.mesh.setSize(list(set(bhe_pts)), 0.4)
+    well_pts = [(0, t) for tag in all_segs
+                for dim, t in gmsh.model.getBoundary([(1, tag)], oriented=False) if dim == 0]
+    if well_pts:
+        gmsh.model.mesh.setSize(list(set(well_pts)), 0.5)
 
     gmsh.option.setNumber("Mesh.MeshSizeFromPoints", 1)
     gmsh.option.setNumber("Mesh.MeshSizeExtendFromBoundary", 0)
@@ -321,9 +309,9 @@ def build_mesh(cfg, out_dir):
 # Leistungskurve
 
 def build_power_curve(cfg):
-    """q(t) [W/m] = P_sonde/L_aktiv; mit 3-Tage-Rampen zwischen Monaten."""
+    """q_warm(t) [W/m]; Kaltbrunnen erhält −q über neg_unity-Parameter in OGS."""
     monthly   = cfg["cycles"]["power_W"]
-    L         = cfg["borehole"]["L_active"]
+    L         = cfg["aquifer"]["L_active"]
     ramp      = max(60.0, cfg["cycles"]["ramp_days"] * DAY)
     month_dur = 365.25 / 12.0 * DAY
     times, vals = [0.0], [0.0]
@@ -364,7 +352,6 @@ def _indent(elem, level=0):
 
 def build_prj(cfg, out_dir, mesh_files):
     prefix  = cfg["prefix"]
-    n_bhe   = len(_bhe_positions(cfg))
     layers  = list(reversed(cfg["layers"]))  # bottom → top = MaterialID 0, 1, 2 …
     sol     = cfg["solver"]
     T0      = cfg["T0_K"]
@@ -374,10 +361,8 @@ def build_prj(cfg, out_dir, mesh_files):
     root = ET.Element("OpenGeoSysProject")
 
     meshes = _se(root, "meshes")
-    for key in ("domain", "top", "bottom"):
+    for key in ("domain", "top", "bottom", "well_warm", "well_cold"):
         _se(meshes, "mesh", mesh_files[key])
-    for i in range(n_bhe):
-        _se(meshes, "mesh", mesh_files[f"bhe_{i:02d}"])
 
     proc = _se(_se(root, "processes"), "process")
     _se(proc, "name", "HeatConduction")
@@ -386,10 +371,8 @@ def build_prj(cfg, out_dir, mesh_files):
     _se(_se(proc, "process_variables"), "process_variable", "temperature")
 
     def _add_medium(media_el, mid, soil):
-        # HEAT_CONDUCTION liest density, specific_heat_capacity und thermal_conductivity
-        # direkt auf Medium-Ebene (keine Solid-Phase nötig bei reiner Wärmeleitung).
         med   = _se(media_el, "medium", id=mid)
-        _se(med, "phases")   # leer: kein Fluidfluss
+        _se(med, "phases")
         props = _se(med, "properties")
         _prop(props, "density",                soil["rho_s"])
         _prop(props, "specific_heat_capacity", soil["cp_s"])
@@ -399,11 +382,8 @@ def build_prj(cfg, out_dir, mesh_files):
     media = _se(root, "media")
     for mid, soil in enumerate(layers):
         _add_medium(media, mid, soil)
-    # BHE-Linienelemente im Domain-Mesh haben eigene MaterialIDs (n_layers … n_layers+n_bhe-1).
-    # OGS verlangt für jede MaterialID ein Medium — die Werte spielen keine Rolle,
-    # da die Wärme über Source Terms eingetragen wird, nicht über Materialeigenschaften.
     mid_soil = layers[len(layers) // 2]
-    for mid in range(len(layers), len(layers) + n_bhe):
+    for mid in range(len(layers), len(layers) + 2):  # +2 für Warm- und Kaltbrunnen
         _add_medium(media, mid, mid_soil)
 
     tl  = _se(root, "time_loop")
@@ -428,11 +408,11 @@ def build_prj(cfg, out_dir, mesh_files):
         p = _se(params, "parameter")
         _se(p, "name", name)
         for k, v in kw.items(): _se(p, k, v)
-    _param("T0",        type="Constant",   value=T0)
-    _param("unity",     type="Constant",   value="1")
-    # CurveScaled: bhe_power(t) = power_curve(t) × unity
-    # OGS braucht zwingend einen Parameter-Verweis; "unity"=1 ist der Platzhalter.
-    _param("bhe_power", type="CurveScaled", curve="power_curve", parameter="unity")
+    _param("T0",         type="Constant",    value=T0)
+    _param("unity",      type="Constant",    value="1")
+    _param("neg_unity",  type="Constant",    value="-1")
+    _param("warm_power", type="CurveScaled", curve="power_curve", parameter="unity")
+    _param("cold_power", type="CurveScaled", curve="power_curve", parameter="neg_unity")
 
     pvars = _se(root, "process_variables")
     pvs   = _se(pvars, "process_variable")
@@ -445,11 +425,11 @@ def build_prj(cfg, out_dir, mesh_files):
         _se(bc, "mesh", Path(mesh_files[face]).stem)
         _se(bc, "type", "Dirichlet"); _se(bc, "parameter", "T0")
     sts = _se(pvs, "source_terms")
-    for i in range(n_bhe):
+    for well, param in [("well_warm", "warm_power"), ("well_cold", "cold_power")]:
         st = _se(sts, "source_term")
-        _se(st, "mesh",      Path(mesh_files[f"bhe_{i:02d}"]).stem)
+        _se(st, "mesh",      Path(mesh_files[well]).stem)
         _se(st, "type",      "Volumetric")
-        _se(st, "parameter", "bhe_power")
+        _se(st, "parameter", param)
 
     nl = _se(_se(root, "nonlinear_solvers"), "nonlinear_solver")
     _se(nl, "name", "basic_picard"); _se(nl, "type", "Picard")
@@ -504,9 +484,9 @@ def run_ogs(prj_path, n_steps=None):
               f"  → ogs {prj_path} -o {prj_path.parent}", file=sys.stderr)
         return 1
 
-    step_re    = re.compile(r"Time step #(\d+) started")
-    width      = len(str(n_steps)) if n_steps else 4
-    t_step1    = None   # Wanduhrzeit bei Schritt 1 (für ETA-Berechnung)
+    step_re = re.compile(r"Time step #(\d+) started")
+    width   = len(str(n_steps)) if n_steps else 4
+    t_step1 = None
 
     def _fmt_eta(seconds):
         if seconds < 60:   return f"{seconds:.0f} s"
@@ -525,13 +505,11 @@ def run_ogs(prj_path, n_steps=None):
             now  = time.time()
             if step == 1:
                 t_step1 = now
-
             eta_str = ""
             if n_steps and t_step1 and step > 1:
                 avg_per_step = (now - t_step1) / (step - 1)
                 eta_s        = avg_per_step * (n_steps - step)
                 eta_str      = f"  noch ~{_fmt_eta(eta_s)}"
-
             total = f"/{n_steps}" if n_steps else ""
             pct   = f" ({step/n_steps*100:.0f}%)" if n_steps else ""
             bar   = "█" * int(step/n_steps*20) + "░" * (20 - int(step/n_steps*20)) if n_steps else ""
@@ -566,43 +544,43 @@ def plot_results(cfg, out_dir):
 
     first = pv.read(str(entries[0][1]))
     z_top = float(first.points[:, 2].max())
+    aq    = cfg["aquifer"]
+    sp    = cfg["doublet"]["spacing"]
+    z_mid = z_top - (aq["top"] + aq["bottom"]) / 2.0
 
-    positions = _bhe_positions(cfg)
-    cx, cy = min(positions, key=lambda p: p[0]**2 + p[1]**2)
-    bh = cfg["borehole"]
-    depths = {
-        f"Oben  (−{bh['top']:.0f} m)":    z_top - bh["top"],
-        f"Mitte (−{(bh['top']+bh['bottom'])/2:.0f} m)": z_top - (bh["top"] + bh["bottom"]) / 2.0,
-        f"Unten (−{bh['bottom']:.0f} m)":  z_top - bh["bottom"],
+    query_points = {
+        "Warmbrunnen": np.array([-sp / 2, 0.0, z_mid]),
+        "Mitte (x=0)": np.array([0.0,     0.0, z_mid]),
+        "Kaltbrunnen": np.array([ sp / 2, 0.0, z_mid]),
     }
 
     times_yr = np.array([t / (365.25 * 86400) for t, _ in entries])
-    results  = {label: [] for label in depths}
+    results  = {label: [] for label in query_points}
 
     print("Erstelle Plot ...")
     for _, vtu in entries:
         mesh = pv.read(str(vtu))
         pts  = mesh.points
-        for label, z in depths.items():
-            query = np.array([cx, cy, z])
-            idx   = int(np.argmin(np.linalg.norm(pts - query, axis=1)))
+        for label, query in query_points.items():
+            idx = int(np.argmin(np.linalg.norm(pts - query, axis=1)))
             results[label].append(float(mesh.point_data["temperature"][idx]) - 273.15)
 
     fig, ax = plt.subplots(figsize=(11, 5))
-    for (label, temps), color in zip(results.items(), ["tab:blue", "tab:orange", "tab:green"]):
+    for (label, temps), color in zip(results.items(), ["tab:red", "tab:green", "tab:blue"]):
         ax.plot(times_yr, temps, label=label, color=color, linewidth=1.5)
     ax.axhline(T_GROUND_INITIAL_C, color="gray", linestyle="--", linewidth=0.8,
                label=f"Ausgangstemperatur ({T_GROUND_INITIAL_C} °C)")
-    ax.axhline(0, color="red", linestyle=":", linewidth=0.8, label="0 °C (Gefriergrenze)")
+    ax.axhline(0, color="red", linestyle=":", linewidth=0.8, label="0 °C")
     ax.set_xlabel("Zeit [Jahre]")
     ax.set_ylabel("Temperatur [°C]")
-    ax.set_title(f"BTES – Temperatur an Sonde ({cx:.0f}/{cy:.0f}) · {cfg['prefix']}")
+    ax.set_title(
+        f"ATES – Aquifer-Temperatur (Tiefe {(aq['top']+aq['bottom'])/2:.0f} m) · {cfg['prefix']}")
     ax.legend(loc="upper right", fontsize=9)
     ax.grid(True, alpha=0.3)
     ax.set_xlim(left=0)
     plt.tight_layout()
 
-    out_png = out_dir / f"temperature_bhe_{cfg['prefix']}.png"
+    out_png = out_dir / f"temperature_ates_{cfg['prefix']}.png"
     plt.savefig(out_png, dpi=150)
     print(f"Plot gespeichert: {out_png}")
     plt.show()
@@ -611,7 +589,7 @@ def plot_results(cfg, out_dir):
 # Main
 
 def main():
-    ap = argparse.ArgumentParser(description="BTES Saisonalspeicher")
+    ap = argparse.ArgumentParser(description="ATES Saisonalspeicher")
     ap.add_argument("--scenario", default=DEFAULT_SCENARIO,
                     choices=["before_renovation", "after_renovation"])
     ap.add_argument("--no-mesh", action="store_true")
@@ -623,23 +601,23 @@ def main():
 
     cfg    = build_config(args.scenario)
     prefix = cfg["prefix"]
-    n_bhe  = len(_bhe_positions(cfg))
 
     if not args.no_mesh:
-        print(f"[1/3] Mesh: {N_BHE_X}×{N_BHE_Y} Sonden ...")
+        print(f"[1/3] Mesh: Doublette ±{WELL_SPACING_M/2:.0f} m, "
+              f"Aquifer {AQUIFER_TOP_M:.0f}–{AQUIFER_BOTTOM_M:.0f} m ...")
         msh_path = build_mesh(cfg, out_dir)
         print(f"[2/3] msh → vtu ...")
         msh2vtu(msh_path, out_dir, prefix)
 
     mesh_files = {
-        "domain": f"{prefix}_domain.vtu",
-        "top":    f"{prefix}_physical_group_top.vtu",
-        "bottom": f"{prefix}_physical_group_bottom.vtu",
+        "domain":    f"{prefix}_domain.vtu",
+        "top":       f"{prefix}_physical_group_top.vtu",
+        "bottom":    f"{prefix}_physical_group_bottom.vtu",
+        "well_warm": f"{prefix}_physical_group_well_warm.vtu",
+        "well_cold": f"{prefix}_physical_group_well_cold.vtu",
     }
-    for i in range(n_bhe):
-        mesh_files[f"bhe_{i:02d}"] = f"{prefix}_physical_group_bhe_{i:02d}.vtu"
 
-    print(f"[3/3] PRJ ({n_bhe} Quellen, {N_YEARS} Jahre) ...")
+    print(f"[3/3] PRJ (1 Doublette, {N_YEARS} Jahre) ...")
     prj_path = build_prj(cfg, out_dir, mesh_files)
     print(f"      → {prj_path}")
 
